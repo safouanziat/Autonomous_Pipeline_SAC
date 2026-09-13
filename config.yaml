@@ -5,14 +5,14 @@
 # Workflow Stage Toggles (Control granular execution)
 stages:
   synthesize_substrate: false    # Phase 0: Analytical slab builder + BFGS pre-relaxation
-  generate_motifs: true         # Phase 1: 10 physical coordination geometries
-  static_dft: true              # Phase 2: Rattle, approach, and cleavage grid with GPAW
+  generate_motifs: false         # Phase 1: 10 physical coordination geometries
+  static_dft: false              # Phase 2: Rattle, approach, and cleavage grid with GPAW
   aimd: false                   # Phase 3: Langevin AIMD thermal sampling
-  export_dataset: true          # Phase 4: Write mace_train.xyz and mace_val.xyz
-  zero_shot_baseline: true      # Phase 5: Benchmark foundation MACE-MP-0
-  train_mace: true              # Phase 6: Programmatic MACE fine-tuning
-  validate_mace: true           # Phase 6b: Post-training test set validation
-  cineb_screening: true         # Phase 7: Automated CI-NEB + Delta G(T, P)
+  export_dataset: false          # Phase 4: Write mace_train.xyz and mace_val.xyz
+  zero_shot_baseline: false      # Phase 5: Benchmark foundation MACE-MP-0
+  train_mace: false              # Phase 6: Programmatic MACE fine-tuning
+  validate_mace: false           # Phase 6b: Post-training test set validation
+  cineb_screening: false         # Phase 7: Automated CI-NEB + Delta G(T, P)
   production_md: true           # Phase 8: 20 ps active-learning Langevin MD
   generate_figures: true        # Phase 9: Export publication parity and PES plots
 
@@ -79,12 +79,15 @@ mace_mlip:
 production_md:
   enabled: true
   temperature_k: 300.0
-  timestep_fs: 1.0
-  steps: 5000                      # 5 ps trajectory
-  friction: 0.01
+  timestep_fs: 0.5                  # 0.5 fs max requis pour la dynamique avec H
+  steps: 5000                       # Trajectoire de 2.5 ps
+  friction: 0.01                    # Amortissement Langevin
   trajectory_file: "production_mlip_md.traj"
   log_file: "production_mlip_md.log"
-  al_force_threshold: 4.5           # Active Learning trigger: force norm limit (eV/A)
+  al_force_threshold: 2.5           # Seuil d'échantillonnage actif (fallback DFT contrôlé)
+  al_cooldown_steps: 25             # 25 pas d'attente minimum entre 2 appels DFT
+  force_abort_threshold: 8.0        # Décrochage balistique / contact anormal : arrêt net
+  al_z_cutoff: 4.0                  # Distance max (Å) au-dessus du graphène avant détection de désorption
 
 kinetics_and_thermo:
   run_neb: true                     # Automated Climbing-Image NEB via MACE
