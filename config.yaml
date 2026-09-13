@@ -1,0 +1,102 @@
+# =====================================================================
+# Master Configuration: Autonomous End-to-End SAC -> MLIP Platform
+# =====================================================================
+
+# Workflow Stage Toggles (Control granular execution)
+stages:
+  synthesize_substrate: false    # Phase 0: Analytical slab builder + BFGS pre-relaxation
+  generate_motifs: true         # Phase 1: 10 physical coordination geometries
+  static_dft: true              # Phase 2: Rattle, approach, and cleavage grid with GPAW
+  aimd: false                   # Phase 3: Langevin AIMD thermal sampling
+  export_dataset: true          # Phase 4: Write mace_train.xyz and mace_val.xyz
+  zero_shot_baseline: true      # Phase 5: Benchmark foundation MACE-MP-0
+  train_mace: true              # Phase 6: Programmatic MACE fine-tuning
+  validate_mace: true           # Phase 6b: Post-training test set validation
+  cineb_screening: true         # Phase 7: Automated CI-NEB + Delta G(T, P)
+  production_md: true           # Phase 8: 20 ps active-learning Langevin MD
+  generate_figures: true        # Phase 9: Export publication parity and PES plots
+
+system:
+  metal: "Pt"                          # Central transition metal (Pt, Fe, Co, Ni, etc.)
+  coordination_element: "N"             # Heteroatom dopant (N, S, P, O, C)
+  cell_size: [4, 4]                    # Graphene supercell dimensions
+  vacuum: 10.0                         # Vacuum thickness in z (Angstroms)
+  pre_relax_fmax: 0.05                 # Substrate synthesis force cutoff (eV/A)
+  db_path: "catalysis.db"              # Central SQLite database
+  export_train_xyz: "mace_train.xyz"   # Training split
+  export_val_xyz: "mace_val.xyz"       # Validation split
+  train_ratio: 0.85
+  executor: "local"                    # "local" (in-line multiprocessing) or "slurm"
+
+  # --- TEST / SMOKE TEST CONTROL ---
+  # Set enabled: false for the full production run of 10 motifs
+  test_subset:
+    enabled: false
+    motifs: ["Pt-N4", "Pt-N3"]       # Choose 1 or 2 motifs to run (e.g. ["Pt-N4"])
+    max_configs_per_motif: 2         # Cap the static PES points per motif
+
+adsorbate:
+  type: "H2"                           # Diatomic gas-phase reactant
+  eq_bond_length: 0.74                 # Pristine gas-phase bond length (Angstroms)
+  approach_z_heights: [1.4, 1.8, 2.2, 2.6, 3.2, 4.0]
+  cleavage_z_heights: [1.8, 2.2]
+  bond_stretch_distances: [0.85, 1.10, 1.40, 1.80, 2.30]
+
+dft:
+  xc: "PBE"
+  use_d3: true                         # Grimme-D3 dispersion with Becke-Johnson damping
+  spinpol: false                       # Set true for Fe, Co, Ni
+  hubbard_u: 0.0                       # On-site Dudarev +U on metal d-orbitals (eV)
+  pw_cutoff: 350.0
+  kpts: [1, 1, 1]
+  convergence:
+    energy: 1.0e-5
+    density: 1.0e-4
+  smearing: 0.05
+
+sampling:
+  rattle:
+    enabled: true
+    amplitudes: [0.03, 0.06]
+    replicates_per_amp: 1
+  aimd:
+    enabled: false
+    temperature_k: 300.0
+    total_fs: 100.0
+    dt_fs: 1.0
+    sample_interval_fs: 25.0
+    friction: 0.01
+
+mace_mlip:
+  model_name: "mace_sac_model"
+  foundation_model: "small"        # MACE-MP-0 model variant for zero-shot test
+  batch_size: 4
+  max_epochs: 60
+  energy_weight: 1.0
+  forces_weight: 10.0
+  device: "cpu"
+
+production_md:
+  enabled: true
+  temperature_k: 300.0
+  timestep_fs: 1.0
+  steps: 5000                      # 5 ps trajectory
+  friction: 0.01
+  trajectory_file: "production_mlip_md.traj"
+  log_file: "production_mlip_md.log"
+  al_force_threshold: 4.5           # Active Learning trigger: force norm limit (eV/A)
+
+kinetics_and_thermo:
+  run_neb: true                     # Automated Climbing-Image NEB via MACE
+  neb_climbing: true
+  neb_images: 3                     # Intermediate transition state images
+  neb_fmax: 0.08                    # Convergence criterion for MEP (eV/A)
+  calc_free_energy: true            # Compute ZPE and Delta G via vibrational analysis
+  temperature_k: 298.15
+  pressure_bar: 1.0
+
+slurm:
+  partition: "compute"
+  nodes: 1
+  ntasks_per_node: 12
+  time_limit: "24:00:00"

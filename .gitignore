@@ -1,0 +1,26 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+
+# Databases and large trajectories
+*.db
+*.traj
+*.gpw
+*.cube
+
+# MACE weights & compiled models
+*.model
+checkpoints/
+
+# Logs & scratch directories
+*.log
+gpaw_logs/
+logs/
+vib_*_init/
+vib_*_ts/
+
+# Environment
+gpaw_env/
+.env
