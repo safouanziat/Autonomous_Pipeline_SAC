@@ -5,6 +5,8 @@ CI-NEB, Thermochemistry, and Matplotlib Figure Generation.
 
 import os
 import sys
+import glob
+import re
 import subprocess
 import shutil
 import numpy as np
@@ -156,7 +158,6 @@ class SACPipelineEngine:
         make_3coord([coord_elem, "C", "C"], f"{metal_sym}-{coord_elem}1C2")
         make_3coord(["C", "C", "C"], f"{metal_sym}-C3")
 
-        # Check config for test subset filter
         sub_cfg = self.sys_cfg.get("test_subset", {})
         if sub_cfg.get("enabled", False):
             selected = sub_cfg.get("motifs", [])
@@ -212,7 +213,6 @@ class SACPipelineEngine:
         s_dissoc.extend(Atoms(mol_type, positions=[a_metal, a_neigh]))
         configs.append((s_dissoc, {"stage": "dissociated_chemisorbed", "has_adsorbate": True, "d_bond": round(float(np.linalg.norm(a_metal - a_neigh)), 3)}))
 
-        # Cap configs if running a smoke test
         sub_cfg = self.sys_cfg.get("test_subset", {})
         if sub_cfg.get("enabled", False):
             limit = sub_cfg.get("max_configs_per_motif", None)
@@ -326,7 +326,7 @@ class SACPipelineEngine:
     def benchmark_zero_shot(self) -> dict:
         from mace.calculators import mace_mp
         val_atoms = read(self.sys_cfg["export_val_xyz"], index=":")
-        calc = mace_mp(model=self.mace_cfg.get("foundation_model", "medium"), device=self.mace_cfg.get("device", "cpu"))
+        calc = mace_mp(model=self.mace_cfg.get("foundation_model", "small"), device=self.mace_cfg.get("device", "cpu"))
 
         dft_e, zs_e, dft_f, zs_f = [], [], [], []
         for atoms in val_atoms:
@@ -415,34 +415,61 @@ class SACPipelineEngine:
             logfile=self.prod_cfg["log_file"]
         )
 
-        al_threshold = self.prod_cfg.get("al_force_threshold", 4.5)
+        al_threshold = self.prod_cfg.get("al_force_threshold", 2.5)
+        force_abort = self.prod_cfg.get("force_abort_threshold", 8.0)
+        cooldown_steps = self.prod_cfg.get("al_cooldown_steps", 25)
+        z_cutoff = self.prod_cfg.get("al_z_cutoff", 4.0)
+
         al_trapped = 0
+        last_dft_step = -100
 
         for step in range(self.prod_cfg["steps"]):
             dyn.run(1)
             traj.write(initial_structure)
 
+            pos = initial_structure.get_positions()
+            syms = np.array(initial_structure.get_chemical_symbols())
+
+            # 1. Boundary check: lightweight adsorbate (H) desorbed into vacuum
+            h_mask = (syms == "H")
+            c_mask = (syms == "C")
+            if np.any(h_mask) and np.any(c_mask):
+                z_slab = np.mean(pos[c_mask, 2])
+                z_h = pos[h_mask, 2]
+                if np.any(z_h > z_slab + z_cutoff) or np.any(z_h < z_slab - 2.0):
+                    print(f"\n  [MD Safety] H2 desorbed or drifted into vacuum at step {step} (z > {z_cutoff} Å). Stopping trajectory cleanly.")
+                    break
+
+            # 2. Force checks
             forces = initial_structure.get_forces()
             f_max = np.max(np.linalg.norm(forces, axis=1))
 
+            # Severe non-physical explosion or nuclear clash
+            if f_max > force_abort:
+                print(f"\n  [MD Safety] Unphysical force spike ({f_max:.2f} eV/A > {force_abort} eV/A) at step {step}. Aborting trajectory.")
+                break
+
+            # Informative OOD region: DFT fallback with stride cooldown
             if f_max > al_threshold:
-                al_trapped += 1
-                print(f"\n  [Active Learning Alert] Step {step}: Force norm ({f_max:.2f} eV/A) exceeded threshold. Triggering DFT fallback...")
-                e_dft, f_dft = self.run_dft_evaluation(initial_structure.copy(), f"gpaw_logs/al_trap_step{step}")
-                meta = {
-                    "motif": "production_md_al_trap",
-                    "stage": f"al_fallback_step{step}",
-                    "has_adsorbate": True,
-                    "dft_code": f"GPAW_{self.dft_cfg['xc']}_D3",
-                    "converged": True
-                }
-                self.save_record(initial_structure.copy(), e_dft, f_dft, meta)
+                if step - last_dft_step >= cooldown_steps:
+                    al_trapped += 1
+                    last_dft_step = step
+                    print(f"\n  [Active Learning Alert] Step {step}: Force norm ({f_max:.2f} eV/A) exceeded threshold. Triggering DFT fallback...")
+                    e_dft, f_dft = self.run_dft_evaluation(initial_structure.copy(), f"gpaw_logs/al_trap_step{step}")
+                    meta = {
+                        "motif": "production_md_al_trap",
+                        "stage": f"al_fallback_step{step}",
+                        "has_adsorbate": True,
+                        "dft_code": f"GPAW_{self.dft_cfg['xc']}_D3",
+                        "converged": True
+                    }
+                    self.save_record(initial_structure.copy(), e_dft, f_dft, meta)
 
         traj.close()
         return al_trapped
 
     # -------------------------------------------------------------
-    # 6. Automated CI-NEB Catalytic Barrier Screening
+    # 6. Automated CI-NEB Catalytic Barrier Screening (IDPP Robust)
     # -------------------------------------------------------------
     def run_cineb_screening(self, motifs: dict, model_path: str) -> dict:
         from mace.calculators import MACECalculator
@@ -455,10 +482,10 @@ class SACPipelineEngine:
             metal_idx = np.where(np.array(slab.get_chemical_symbols()) == self.sys_cfg["metal"])[0][0]
             metal_pos = slab.positions[metal_idx]
 
-            # Initial State: Physisorbed reactant (z = 2.5 A)
+            # Initial State: Physisorbed reactant (z ~ 2.3 A)
             initial = slab.copy()
-            h1 = metal_pos + np.array([-d_eq / 2.0, 0.0, 2.5])
-            h2 = metal_pos + np.array([d_eq / 2.0, 0.0, 2.5])
+            h1 = metal_pos + np.array([-d_eq / 2.0, 0.0, 2.3])
+            h2 = metal_pos + np.array([d_eq / 2.0, 0.0, 2.3])
             initial.extend(Atoms(mol_type, positions=[h1, h2]))
             initial.calc = MACECalculator(model_paths=model_path, device=self.mace_cfg.get("device", "cpu"))
             opt_i = BFGS(initial, logfile=None)
@@ -474,7 +501,7 @@ class SACPipelineEngine:
             opt_f.run(fmax=self.kin_cfg.get("neb_fmax", 0.05))
 
             # Generate intermediate images
-            n_images = self.kin_cfg.get("neb_images", 5)
+            n_images = self.kin_cfg.get("neb_images", 3)
             images = [initial]
             for _ in range(n_images):
                 image = initial.copy()
@@ -482,8 +509,9 @@ class SACPipelineEngine:
                 images.append(image)
             images.append(final)
 
+            # Climbing Image NEB with IDPP interpolation
             neb = NEB(images, climb=self.kin_cfg.get("neb_climbing", True))
-            neb.interpolate()
+            neb.interpolate("idpp")
             opt_neb = BFGS(neb, trajectory=f"neb_{motif_name}.traj", logfile=f"gpaw_logs/neb_{motif_name}.log")
             opt_neb.run(fmax=self.kin_cfg.get("neb_fmax", 0.05))
 
@@ -521,62 +549,280 @@ class SACPipelineEngine:
         return float(g)
 
     # -------------------------------------------------------------
-    # 8. Automated Publication Figures
+    # 8. Automated Publication Figures (All 4 Plots, Polished)
     # -------------------------------------------------------------
-    def generate_publication_figures(self, zs_data: dict, ft_data: dict, neb_data: dict):
+    def generate_publication_figures(self, zs_data: dict = None, ft_data: dict = None, neb_data: dict = None):
+        from mace.calculators import MACECalculator, mace_mp
+
+        model_name = self.mace_cfg.get("model_name", "mace_sac_model")
+        model_path = f"{model_name}_stagetwo.model"
+        if not os.path.exists(model_path):
+            model_path = f"{model_name}.model"
+
+        val_path = self.sys_cfg.get("export_val_xyz", "mace_val.xyz")
+        device = self.mace_cfg.get("device", "cpu")
+
+        # 1. Parity Data Resolution: compute from disk if missing/empty
+        if not ft_data and os.path.exists(val_path) and os.path.exists(model_path):
+            print("  -> Evaluating test set parity from disk artifacts...")
+            val_atoms = read(val_path, index=":")
+            calc_ft = MACECalculator(model_paths=model_path, device=device)
+            calc_zs = mace_mp(model=self.mace_cfg.get("foundation_model", "small"), device=device)
+
+            dft_e_pa, ft_e_pa, zs_e_pa = [], [], []
+            dft_f, ft_f = [], []
+
+            for atoms in val_atoms:
+                n_at = len(atoms)
+                e_dft = atoms.get_potential_energy()
+                f_dft = atoms.get_forces()
+
+                atoms.calc = calc_ft
+                e_ft = atoms.get_potential_energy()
+                f_ft = atoms.get_forces()
+
+                atoms.calc = calc_zs
+                e_zs = atoms.get_potential_energy()
+
+                dft_e_pa.append(e_dft / n_at)
+                ft_e_pa.append(e_ft / n_at)
+                zs_e_pa.append(e_zs / n_at)
+                dft_f.append(f_dft)
+                ft_f.append(f_ft)
+
+            dft_e_pa = np.array(dft_e_pa)
+            ft_e_pa = np.array(ft_e_pa)
+            zs_e_pa = np.array(zs_e_pa)
+
+            ft_data = {
+                "dft_energy_pa": dft_e_pa,
+                "pred_energy_pa": ft_e_pa,
+                "dft_forces": dft_f,
+                "pred_forces": ft_f,
+                "mae_energy_pa": float(np.mean(np.abs(ft_e_pa - dft_e_pa))),
+                "mae_forces": float(np.mean(np.abs(np.concatenate(ft_f) - np.concatenate(dft_f))))
+            }
+            zs_data = {
+                "pred_energy_pa": zs_e_pa,
+                "mae_energy_pa": float(np.mean(np.abs(zs_e_pa - dft_e_pa)))
+            }
+
+        # 2. CI-NEB Data Resolution: parse neb_*.traj files if missing/empty
+        if not neb_data:
+            neb_files = sorted(glob.glob("neb_*.traj"))
+            if neb_files:
+                print(f"  -> Reading {len(neb_files)} CI-NEB trajectories from disk...")
+                neb_data = {}
+                n_images = self.kin_cfg.get("neb_images", 3)
+                total_band = n_images + 2
+
+                for traj_path in neb_files:
+                    motif = os.path.basename(traj_path).replace("neb_", "").replace(".traj", "")
+                    try:
+                        traj = Trajectory(traj_path)
+                        n_frames = len(traj)
+                        if n_frames < total_band:
+                            continue
+
+                        converged_band = [traj[i] for i in range(-total_band, 0)]
+                        energies = []
+                        for img in converged_band:
+                            try:
+                                energies.append(img.get_potential_energy())
+                            except Exception:
+                                img.calc = MACECalculator(model_paths=model_path, device=device)
+                                energies.append(img.get_potential_energy())
+
+                        energies = np.array(energies)
+                        e_act = max(energies) - energies[0]
+                        delta_e = energies[-1] - energies[0]
+                        neb_data[motif] = {
+                            "energies": energies.tolist(),
+                            "e_act": float(e_act),
+                            "delta_e": float(delta_e)
+                        }
+                    except Exception as err:
+                        print(f"  (!) Warning: Could not parse {traj_path}: {err}")
+
         plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
-        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
-        # Energy Parity Plot
-        dft_e = np.array(ft_data["dft_energy"])
-        ft_e = np.array(ft_data["pred_energy"])
-        axes[0].scatter(dft_e, ft_e, color="#1f77b4", label=f"Fine-Tuned MACE (MAE={ft_data['mae_energy']*1000:.1f} meV)", s=45, alpha=0.9)
-        if zs_data:
-            zs_e = np.array(zs_data["pred_energy"])
-            axes[0].scatter(dft_e, zs_e, color="#d62728", marker="^", label=f"Zero-Shot MACE-MP-0 (MAE={zs_data['mae_energy']*1000:.1f} meV)", s=45, alpha=0.5)
+        # =========================================================================
+        # FIGURE 1: Parity Plots (Energy Normalized per Atom & Cartesian Forces)
+        # =========================================================================
+        if ft_data:
+            dft_e = np.array(ft_data["dft_energy_pa"])
+            ft_e = np.array(ft_data["pred_energy_pa"])
+            dft_f = np.concatenate(ft_data["dft_forces"]).flatten()
+            ft_f = np.concatenate(ft_data["pred_forces"]).flatten()
 
-        lims_e = [min(dft_e) - 0.5, max(dft_e) + 0.5]
-        axes[0].plot(lims_e, lims_e, "k--", alpha=0.7)
-        axes[0].set_xlim(lims_e)
-        axes[0].set_ylim(lims_e)
-        axes[0].set_xlabel("DFT Energy (eV)", fontsize=12)
-        axes[0].set_ylabel("Predicted Energy (eV)", fontsize=12)
-        axes[0].set_title("Energy Parity (Held-Out Test Set)", fontsize=13, fontweight="bold")
-        axes[0].legend(frameon=True)
+            fig, axes = plt.subplots(1, 2, figsize=(13, 5.5), dpi=300)
 
-        # Forces Parity Plot
-        dft_f = np.concatenate(ft_data["dft_forces"]).flatten()
-        ft_f = np.concatenate(ft_data["pred_forces"]).flatten()
-        axes[1].scatter(dft_f, ft_f, color="#2ca02c", label=f"Fine-Tuned MACE (MAE={ft_data['mae_forces']*1000:.1f} meV/Å)", s=15, alpha=0.4)
-        lims_f = [min(dft_f), max(dft_f)]
-        axes[1].plot(lims_f, lims_f, "k--", alpha=0.7)
-        axes[1].set_xlim(lims_f)
-        axes[1].set_ylim(lims_f)
-        axes[1].set_xlabel("DFT Atomic Forces (eV/Å)", fontsize=12)
-        axes[1].set_ylabel("Predicted Forces (eV/Å)", fontsize=12)
-        axes[1].set_title("Forces Parity", fontsize=13, fontweight="bold")
-        axes[1].legend(frameon=True)
+            # Strict Monotonic Limits for Per-Atom Energy
+            all_e = [dft_e, ft_e]
+            if zs_data:
+                zs_e = np.array(zs_data["pred_energy_pa"])
+                all_e.append(zs_e)
+            e_min, e_max = float(np.min(all_e)) - 0.05, float(np.max(all_e)) + 0.05
 
-        plt.tight_layout()
-        plt.savefig("figures/parity_plot.png", dpi=300)
-        plt.close()
+            axes[0].plot([e_min, e_max], [e_min, e_max], "k--", lw=1.2, alpha=0.7, label="Ideal Parity (y = x)")
+            if zs_data:
+                axes[0].scatter(dft_e, zs_e, color="#d62728", marker="^", s=45, alpha=0.6,
+                                label=f"Zero-Shot MACE-MP-0 (MAE={zs_data['mae_energy_pa']*1000:.1f} meV/atom)")
+            axes[0].scatter(dft_e, ft_e, color="#1f77b4", marker="o", s=50, edgecolors="k", lw=0.5,
+                            label=f"Fine-Tuned MACE (MAE={ft_data['mae_energy_pa']*1000:.1f} meV/atom)")
+            axes[0].set_xlim(e_min, e_max)
+            axes[0].set_ylim(e_min, e_max)
+            axes[0].set_xlabel("DFT Energy (eV/atom)", fontsize=11, fontweight="bold")
+            axes[0].set_ylabel("Predicted Energy (eV/atom)", fontsize=11, fontweight="bold")
+            axes[0].set_title("Energy Parity (Held-Out Test Set)", fontsize=12, fontweight="bold")
+            axes[0].legend(frameon=True, loc="upper left")
 
-        # Reaction Profiles Figure
+            # Forces Parity
+            f_min, f_max = float(np.min([dft_f, ft_f])), float(np.max([dft_f, ft_f]))
+            axes[1].plot([f_min, f_max], [f_min, f_max], "k--", lw=1.2, alpha=0.7, label="Ideal Parity (y = x)")
+            axes[1].scatter(dft_f, ft_f, color="#2ca02c", s=18, alpha=0.45, edgecolors="none",
+                            label=f"Fine-Tuned MACE (MAE={ft_data['mae_forces']*1000:.1f} meV/Å)")
+            axes[1].set_xlim(f_min, f_max)
+            axes[1].set_ylim(f_min, f_max)
+            axes[1].set_xlabel("DFT Cartesian Forces (eV/Å)", fontsize=11, fontweight="bold")
+            axes[1].set_ylabel("Predicted Forces (eV/Å)", fontsize=11, fontweight="bold")
+            axes[1].set_title("Forces Parity", fontsize=12, fontweight="bold")
+            axes[1].legend(frameon=True, loc="upper left")
+
+            plt.tight_layout()
+            plt.savefig("figures/parity_plot.png")
+            plt.close()
+            print("  -> Output written: figures/parity_plot.png")
+
+        # =========================================================================
+        # FIGURE 2: Reaction Profiles Across Coordination Motifs
+        # =========================================================================
         if neb_data:
-            fig, ax = plt.subplots(figsize=(10, 6))
+            fig, ax = plt.subplots(figsize=(10, 6), dpi=300)
             for motif, res in neb_data.items():
                 energies = np.array(res["energies"]) - res["energies"][0]
                 rxn_coord = np.linspace(0, 1, len(energies))
-                ax.plot(rxn_coord, energies, marker="o", label=f"{motif} (Ea={res['e_act']:.2f} eV)")
+                ax.plot(rxn_coord, energies, marker="o", lw=1.8, label=f"{motif} (Ea={res['e_act']:.2f} eV)")
 
-            ax.set_xlabel("Reaction Coordinate (Normalized)", fontsize=12)
-            ax.set_ylabel("Relative Energy (eV)", fontsize=12)
-            ax.set_title(f"Catalytic {self.ads_cfg['type']} Activation Pathways Across 10 Coordination Shells", fontsize=13, fontweight="bold")
+            ax.set_xlabel("Reaction Coordinate (Normalized)", fontsize=11, fontweight="bold")
+            ax.set_ylabel("Relative Energy (eV)", fontsize=11, fontweight="bold")
+            ax.set_title(f"Catalytic {self.ads_cfg['type']} Activation Across Coordination Shells", fontsize=12, fontweight="bold")
             ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left", frameon=True)
             plt.tight_layout()
-            plt.savefig("figures/reaction_profiles.png", dpi=300)
+            plt.savefig("figures/reaction_profiles.png")
             plt.close()
-            print("  -> Figures saved: figures/parity_plot.png & figures/reaction_profiles.png")
+            print("  -> Output written: figures/reaction_profiles.png")
+
+        # =========================================================================
+        # FIGURE 3: Volcano Plot (Strict Single- vs Divacancy Categorization)
+        # =========================================================================
+        if neb_data:
+            single_vac_motifs = ["Pt-C3", "Pt-N1C2", "Pt-N2C1", "Pt-N3"]
+            
+            def sort_key(name):
+                n_m = re.search(r"N(\d+)", name)
+                n = int(n_m.group(1)) if n_m else (3 if name == "Pt-N3" else (4 if name == "Pt-N4" else 0))
+                is_single = name in single_vac_motifs
+                return (0 if is_single else 1, n, name)
+
+            sorted_motifs = sorted(neb_data.keys(), key=sort_key)
+            ea_vals = [neb_data[m]["e_act"] for m in sorted_motifs]
+            de_vals = [neb_data[m].get("delta_e", neb_data[m]["energies"][-1] - neb_data[m]["energies"][0]) for m in sorted_motifs]
+
+            fig, ax1 = plt.subplots(figsize=(11, 5.5), dpi=300)
+            ax2 = ax1.twinx()
+
+            x_pos = np.arange(len(sorted_motifs))
+
+            ax1.plot(x_pos, ea_vals, color="#1f77b4", marker="s", lw=2, ms=7, label=r"Activation Barrier ($E_a$)")
+            ax1.set_ylabel(r"$E_a$ (eV)", color="#1f77b4", fontsize=11, fontweight="bold")
+            ax1.tick_params(axis="y", labelcolor="#1f77b4")
+            ax1.set_ylim(-0.1, max(ea_vals) * 1.15)
+
+            ax2.plot(x_pos, de_vals, color="#d62728", marker="o", lw=2, ms=7, ls="--", label=r"Reaction Energy ($\Delta E$)")
+            ax2.set_ylabel(r"$\Delta E$ (eV)", color="#d62728", fontsize=11, fontweight="bold")
+            ax2.tick_params(axis="y", labelcolor="#d62728")
+            ax2.axhline(0.0, color="gray", ls=":", lw=1.2, alpha=0.8)
+
+            # Strict 4 single-vac motifs (indices 0, 1, 2, 3)
+            n_single = sum(1 for m in sorted_motifs if m in single_vac_motifs)
+            ax1.axvspan(-0.5, n_single - 0.5, color="#2ca02c", alpha=0.08, label="Single-Vacancy (3-coord)")
+            ax1.axvspan(n_single - 0.5, len(sorted_motifs) - 0.5, color="#ff7f0e", alpha=0.08, label="Divacancy (4-coord)")
+
+            ax1.set_xticks(x_pos)
+            ax1.set_xticklabels(sorted_motifs, rotation=35, ha="right", fontweight="bold")
+            ax1.set_xlabel("Coordination Motif (Grouped by Vacancy Type & N-Content)", fontsize=11, fontweight="bold")
+
+            lines1, labels1 = ax1.get_legend_handles_labels()
+            lines2, labels2 = ax2.get_legend_handles_labels()
+            ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", frameon=True, fontsize=9.5)
+
+            plt.title("Catalytic Activation and Reaction Energies Across Coordination Motifs", fontsize=12, fontweight="bold")
+            plt.tight_layout()
+            plt.savefig("figures/volcano_plot.png")
+            plt.close()
+            print("  -> Output written: figures/volcano_plot.png")
+
+        # =========================================================================
+        # FIGURE 4: Active Learning Production MD Stability & Traps
+        # =========================================================================
+        md_traj_path = self.prod_cfg.get("trajectory_file", "production_md.traj")
+        if os.path.exists(md_traj_path):
+            try:
+                traj = Trajectory(md_traj_path)
+                dt_fs = self.prod_cfg.get("timestep_fs", 0.5)
+                al_thresh = self.prod_cfg.get("al_force_threshold", 2.5)
+
+                times, pot_energies, temps, max_forces = [], [], [], []
+                for step_i, atoms in enumerate(traj):
+                    times.append(step_i * dt_fs)
+                    pot_energies.append(atoms.get_potential_energy())
+                    ekin = atoms.get_kinetic_energy()
+                    temps.append((2.0 * ekin) / (3.0 * len(atoms) * units.kB))
+                    try:
+                        max_forces.append(np.max(np.linalg.norm(atoms.get_forces(), axis=1)))
+                    except Exception:
+                        max_forces.append(0.0)
+
+                times = np.array(times)
+                pot_energies = np.array(pot_energies) - pot_energies[0]
+                temps = np.array(temps)
+                max_forces = np.array(max_forces)
+
+                fig, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True, dpi=300)
+
+                # Subplot 1: Potential Energy Drift
+                axes[0].plot(times, pot_energies, color="#1f77b4", lw=1.5)
+                axes[0].set_ylabel(r"$\Delta E_{\mathrm{pot}}$ (eV)", fontsize=11, fontweight="bold")
+                axes[0].set_title("Active Learning Production MD Dynamics & Stability", fontsize=12, fontweight="bold")
+
+                # Subplot 2: Instantaneous Temperature & Target
+                axes[1].plot(times, temps, color="#ff7f0e", lw=1.2, label="Instantaneous T")
+                axes[1].axhline(self.prod_cfg.get("temperature_k", 300), color="black", ls="--", alpha=0.7, label="Target 300 K")
+                axes[1].set_ylabel("Temperature (K)", fontsize=11, fontweight="bold")
+                axes[1].legend(loc="upper right", frameon=True)
+
+                # Subplot 3: Max Force & AL Threshold
+                axes[2].plot(times, max_forces, color="#2ca02c", lw=1.2, label=r"$F_{\max}$")
+                axes[2].axhline(al_thresh, color="red", ls="--", lw=1.5, label=f"AL DFT Fallback ({al_thresh} eV/Å)")
+                axes[2].set_ylabel("Max Force (eV/Å)", fontsize=11, fontweight="bold")
+                axes[2].set_xlabel("Simulation Time (fs)", fontsize=11, fontweight="bold")
+                axes[2].legend(loc="upper right", frameon=True)
+
+                # Trap Annotation
+                if len(times) > 0:
+                    axes[2].annotate(f"Trapped at t = {times[-1]:.1f} fs\n(Desorption / AL alert)",
+                                     xy=(times[-1], max_forces[-1]), xytext=(times[-1] * 0.65, max_forces[-1] + 1.0),
+                                     arrowprops=dict(facecolor="black", shrink=0.05, width=1, headwidth=6),
+                                     fontsize=9.5, fontweight="bold",
+                                     bbox=dict(boxstyle="round,pad=0.3", fc="yellow", alpha=0.6))
+
+                plt.tight_layout()
+                plt.savefig("figures/md_trajectory.png")
+                plt.close()
+                print("  -> Output written: figures/md_trajectory.png")
+            except Exception as e:
+                print(f"  (!) Warning: Could not generate MD trajectory plot: {e}")
 
     # -------------------------------------------------------------
     # 9. Slurm Array Script Generator

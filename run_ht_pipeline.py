@@ -261,10 +261,10 @@ def main():
     # -------------------------------------------------------------
     if stages.get("generate_figures"):
         print("\n[Phase 9/9] Generating Publication Figures...")
-        if ft_metrics and neb_results:
+        try:
             engine.generate_publication_figures(zs_metrics, ft_metrics, neb_results)
-        else:
-            print("  (!) Need validation data and NEB data to generate full figures. Skipping.")
+        except Exception as err:
+            print(f"  (!) Figure generation failed: {err}")
     else:
         print("\n[Phase 9/9] Figure Generation Skipped.")
 

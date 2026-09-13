@@ -24,3 +24,9 @@ vib_*_ts/
 # Environment
 gpaw_env/
 .env
+*.model
+*.traj
+*.db
+*.gpw
+gpaw_logs/
+vib_*/
