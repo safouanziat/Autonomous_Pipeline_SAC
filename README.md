@@ -17,104 +17,131 @@ An end-to-end computational pipeline designed to autonomously synthesize Single-
 
 ### Computational Parameters & Convergence Notes
 
-- **Supercell Architecture**: A 4×4 graphene supercell (31–33 atoms depending on H₂ adsorption state) 
-  with a 15 Å vacuum spacing along the z-axis is employed as the default benchmark. 
-  This setup yields an inter-site Pt–Pt separation of ~9.8 Å, which comfortably accommodates 
-  the local interaction cutoff of the MACE foundation model (r_cut = 5.0 Å) while drastically 
-  accelerating high-throughput screening.
-- **DFT Parameters (GPAW)**: Plane-wave / grid cutoff of 350 eV with PBE-D3 dispersion corrections. 
-  This configuration provides smooth, conservative force gradients (numerical noise < 0.05 eV/Å) 
-  suitable for training equivariant message-passing potentials while allowing the full 
-  autonomous pipeline to run efficiently on standard multi-core workstations.
-- **Production Scaling**: For ultra-high precision sub-chemical accuracy (< 0.02 eV barrier shifts), 
-  parameters can be readily scaled to 5×5 supercells and 450+ eV cutoffs directly in `config.yaml`.
+- **Supercell Architecture**: A 4×4 graphene supercell (31–33 atoms depending on H₂ adsorption state) with a 15 Å vacuum spacing along the z-axis is employed as the default benchmark. This setup yields an inter-site Pt–Pt separation of ~9.8 Å, which comfortably accommodates the local interaction cutoff of the MACE foundation model ($r_{\text{cut}} = 5.0$ Å) while drastically accelerating high-throughput screening.
+- **DFT Parameters (GPAW)**: Plane-wave / grid cutoff of 350 eV with PBE-D3 dispersion corrections. This configuration provides smooth, conservative force gradients (numerical noise < 0.05 eV/Å) suitable for training equivariant message-passing potentials while allowing the full autonomous pipeline to run efficiently on standard multi-core workstations.
+- **Production Scaling**: For ultra-high precision sub-chemical accuracy (< 0.02 eV barrier shifts), parameters can be readily scaled to 5×5 supercells and 450+ eV cutoffs directly in `config.yaml`.
 
-## Directory Setup
+---
 
+## 🔄 Autonomous Workflow Architecture
+
+The pipeline orchestrates an active-learning feedback loop coupling first-principles density functional theory (GPAW) with equivariant machine learning interatomic potentials (MACE) to screen single-atom catalyst stability and reactivity without manual intervention.
+
+```mermaid
+flowchart TD
+    classDef stepCard fill:#ffffff,stroke:#334155,stroke-width:1.5px,color:#0f172a
+    classDef decisionCard fill:#fef3c7,stroke:#b45309,stroke-width:1.5px,color:#78350f
+
+    subgraph S1["1. High-Throughput DFT Generation"]
+        A["Supercell Construction<br>Pt-NxCy Configurations"]:::stepCard --> B["GPAW DFT Calculations<br>PW / FD Mode"]:::stepCard
+        B --> C["Dataset Assembly<br>Energy, Forces & Cell Virials"]:::stepCard
+    end
+
+    subgraph S2["2. MLIP Active Learning"]
+        C --> D["MACE Equivariant Training<br>E(3) Message Passing"]:::stepCard
+        D --> E["Langevin MD Exploration<br>Elevated Temperature / Perturbation"]:::stepCard
+        E --> F{"Uncertainty / Committee Threshold"}:::decisionCard
+        F -- High Uncertainty --> B
+        F -- Low Uncertainty / Converged --> G["Production Surrogate MLIP"]:::stepCard
+    end
+
+    subgraph S3["3. Reactivity & Catalytic Screening"]
+        G --> H["Fast Reaction Intermediates Relaxation<br>*H, *OH, *OOH, H2"]:::stepCard
+        H --> I["Automated CI-NEB Barrier Searches<br>Kinetic Transition States"]:::stepCard
+        I --> J["Activity Descriptors & Volcano Profiles"]:::stepCard
+    end
+
+    style S1 fill:#f1f5f9,stroke:#64748b,stroke-width:1.5px,color:#0f172a
+    style S2 fill:#e0f2fe,stroke:#0284c7,stroke-width:1.5px,color:#0f172a
+    style S3 fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px,color:#0f172a
+```
+---
+
+---
+
+## 🔍 Data Inspection & Analysis
+
+The pipeline serializes all intermediate structural snapshots, DFT trajectories, and single-point evaluations into an atomic SQLite database via ASE (`catalysis.db`).
+
+### 1. Command-Line Queries
 ```bash
-mkdir -p Autonomous_Pipeline_SAC
-cd Autonomous_Pipeline_SAC
-# Place config.yaml, pipeline_engine.py, run_ht_pipeline.py, and README.md here
-
-
-
-
-#Installation
-
-Ensure your Python environment contains ASE, GPAW with plane-wave support, PyYAML, Matplotlib, and MACE:
-
-conda create -n sac_mlip python=3.10 -y
-conda activate sac_mlip
-
-# Install dependencies
-pip install ase pyyaml matplotlib
-pip install mace-torch
-pip install gpaw
-
-#Usage
-1. Standard Unattended Run
-
-Runs all phases from in-silico synthesis to publication figures using settings in config.yaml:
-
-python -u run_ht_pipeline.py > pipeline.log 2>&1 &
-tail -f pipeline.log
-
-#2. Targeted Execution via CLI
-
-Control which phases run using command-line arguments without modifying configuration files:
-
-# Skip DFT sampling if catalysis.db is already populated
-python run_ht_pipeline.py --skip synth dft aimd
-
-# Run only the CI-NEB catalytic screening and figure generation
-python run_ht_pipeline.py --only neb figures
-
-# Run only model training and validation
-python run_ht_pipeline.py --only train validate
-
-
-#Workflow Diagram
-
-[ config.yaml ] 
-         │
-         ▼
-  [ Phase 0 ] In-Silico Substrate Synthesis (Pristine Slab + BFGS Pre-relaxation)
-         │
-         ▼
-  [ Phase 1 ] Enumerate 10 Physical Motifs (M-N4, M-N3C1, ..., M-C3)
-         │
-         ▼
-  [ Phase 2 & 3 ] High-Throughput DFT Sampling (GPAW PBE-D3 + Langevin AIMD)
-         │
-         ▼
-  [ Phase 4 ] Export Stratified Train / Validation Datasets (mace_train.xyz, mace_val.xyz)
-         │
-         ▼
-  [ Phase 5 ] Evaluate Foundation Model Zero-Shot Baseline (MACE-MP-0)
-         │
-         ▼
-  [ Phase 6 ] Programmatic MACE Fine-Tuning & Error Quantization
-         │
-         ▼
-  [ Phase 7 ] CI-NEB Catalytic Barrier Screening + Delta G(T, P)
-         │
-         ▼
-  [ Phase 8 ] Active-Learning-Guarded Production Molecular Dynamics (20 ps)
-         │
-         ▼
-  [ Phase 9 ] Publication-Grade Figure Generation (figures/parity_plot.png, etc.)
-
-
-  ##Data Inspection
-
-Query the generated SQLite database using standard ASE tools:
-
-
-# Summary of all evaluated configurations
+# Display summary of stored structures and custom keys
 ase db catalysis.db
 
-# Query specific motifs or reactive stretches
-ase db catalysis.db "motif=Pt-N3,d_bond>1.5"
+# Filter for specific single-atom coordination motifs
+ase db catalysis.db motif="Pt-N4"
 
-# Launch web GUI
+# Query structures by transition-state stretch distance (d_bond > 1.8 Å)
+ase db catalysis.db "d_bond>1.8" -c id,formula,energy,fmax,motif
+
+# Extract configurations to an extended XYZ file for visualization
+ase convert catalysis.db:motif="Pt-N3C1" sub_dataset.xyz
+```
+
+### 2. Interactive Web GUI
+Launch a local web interface to inspect structures, 3D coordinates, and electronic properties interactively:
+```bash
 ase db catalysis.db -w
+```
+*Open your browser and navigate to `http://localhost:5000` to filter, sort, and visualize structures directly.*
+
+---
+
+## ⚙️ Configuration & Customization (`config.yaml`)
+
+Key operational parameters can be customized without touching core execution scripts:
+
+```yaml
+system:
+  supercell: [4, 4, 1]          # Scalable to [5, 5, 1] for ultra-low boundary coupling
+  vacuum: 15.0                  # Vacuum thickness in Angstroms along z-axis
+  metal: "Pt"                   # Target single-atom center (e.g., Pt, Fe, Co, Ni)
+
+gpaw_parameters:
+  mode: "pw"                    # "pw" (plane-wave) or "fd" (finite-difference)
+  energy_cutoff: 350            # Cutoff energy in eV
+  kpts: [1, 1, 1]               # Gamma-point sampling for supercells
+  xc: "PBE"                     # Functional: PBE with D3 dispersion correction
+
+mace_tuning:
+  model_size: "medium"          # MACE architecture scale
+  r_max: 5.0                    # Interaction radial cutoff in Angstroms
+  max_epochs: 250               # Fine-tuning epochs
+  loss: "weighted"              # Energy vs. force balancing mode
+```
+
+---
+
+## 🛠 Troubleshooting & Common Pitfalls
+
+- **Pore Collapse During Pre-relaxation**: If coordinating metals drop out of single or double vacancies, increase the BFGS pre-relaxation step limit or verify `vacuum` spacing in `config.yaml`.
+- **GPAW Plane-Wave Memory Overrun**: High cutoffs on large supercells can exceed memory allocations. Set `mode: "fd"` (finite-difference grid) for lower memory footprints during high-throughput screening phases.
+- **MACE CUDA Out-of-Memory**: Reduce the training batch size in `config.yaml` or reduce the maximum number of active-learning snapshots stored per fine-tuning iteration.
+
+---
+
+## 📚 Related Publications & Theoretical Background
+
+This automated framework builds on the theoretical models and single-atom catalytic mechanisms explored in:
+
+    How N-Doping Promotes Hydrogen Evolution at Graphene-Based Single-Atom Catalysts
+```bibtex
+@article{ziat2026ndoping,
+  author    = {Ziat, Safouan and Brix, F. and Tsaturyan, A. and Kierren, B. and Gaudry, {\'E}.},
+  title     = {How N-Doping Promotes Hydrogen Dissociation at Graphene-Based Single-Atom Catalysts},
+  journal   = {The Journal of Physical Chemistry Letters},
+  year      = {2026},
+  doi       = {10.1021/acs.jpclett.5c03805}
+}
+```
+---
+📖 Citation
+
+If you use this autonomous pipeline implementation in your research or workflows, please cite the repository:
+
+@software{ziat2026autonomous_pipeline,
+  author    = {Ziat, Safouan},
+  title     = {Autonomous High-Throughput Single-Atom Catalysis Screening Pipeline with GPAW and MACE},
+  url       = {[https://github.com/safouanziat/Autonomous_Pipeline_SAC](https://github.com/safouanziat/Autonomous_Pipeline_SAC)},
+  year      = {2026}
+}
