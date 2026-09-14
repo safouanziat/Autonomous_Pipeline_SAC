@@ -17,7 +17,7 @@ An end-to-end computational pipeline designed to autonomously synthesize Single-
 
 ### Computational Parameters & Convergence Notes
 
-- **Supercell Architecture**: A 4×4 graphene supercell (31–33 atoms depending on H₂ adsorption state) with a 15 Å vacuum spacing along the z-axis is employed as the default benchmark. This setup yields an inter-site Pt–Pt separation of ~9.8 Å, which comfortably accommodates the local interaction cutoff of the MACE foundation model ($r_{\text{cut}} = 5.0$ Å) while drastically accelerating high-throughput screening.
+- **Supercell Architecture**: A 4×4 graphene supercell (31–33 atoms depending on H₂ adsorption state) with a 15 Å vacuum spacing along the z-axis is employed as the default benchmark. This setup yields an inter-site TM-TM separation of ~9.8 Å, which comfortably accommodates the local interaction cutoff of the MACE foundation model ($r_{\text{cut}} = 5.0$ Å) while drastically accelerating high-throughput screening.
 - **DFT Parameters (GPAW)**: Plane-wave / grid cutoff of 350 eV with PBE-D3 dispersion corrections. This configuration provides smooth, conservative force gradients (numerical noise < 0.05 eV/Å) suitable for training equivariant message-passing potentials while allowing the full autonomous pipeline to run efficiently on standard multi-core workstations.
 - **Production Scaling**: For ultra-high precision sub-chemical accuracy (< 0.02 eV barrier shifts), parameters can be readily scaled to 5×5 supercells and 450+ eV cutoffs directly in `config.yaml`.
 
@@ -33,7 +33,7 @@ flowchart TD
     classDef decisionCard fill:#fef3c7,stroke:#b45309,stroke-width:1.5px,color:#78350f
 
     subgraph S1["1. High-Throughput DFT Generation"]
-        A["Supercell Construction<br>Pt-NxCy Configurations"]:::stepCard --> B["GPAW DFT Calculations<br>PW / FD Mode"]:::stepCard
+        A["Supercell Construction<br>Mt-NxCy Configurations"]:::stepCard --> B["GPAW DFT Calculations<br>PW / FD Mode"]:::stepCard
         B --> C["Dataset Assembly<br>Energy, Forces & Cell Virials"]:::stepCard
     end
 
@@ -69,13 +69,13 @@ The pipeline serializes all intermediate structural snapshots, DFT trajectories,
 ase db catalysis.db
 
 # Filter for specific single-atom coordination motifs
-ase db catalysis.db motif="Pt-N4"
+ase db catalysis.db motif="Mt-N4"
 
 # Query structures by transition-state stretch distance (d_bond > 1.8 Å)
 ase db catalysis.db "d_bond>1.8" -c id,formula,energy,fmax,motif
 
 # Extract configurations to an extended XYZ file for visualization
-ase convert catalysis.db:motif="Pt-N3C1" sub_dataset.xyz
+ase convert catalysis.db:motif="Mt-N3C1" sub_dataset.xyz
 ```
 
 ### 2. Interactive Web GUI
