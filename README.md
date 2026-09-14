@@ -7,10 +7,10 @@ An end-to-end computational pipeline designed to autonomously synthesize Single-
 ## Key Features
 
 - **Zero-Prerequisite Substrate Synthesis:** Builds graphene supercells analytically, punches divacancy pores, coordinates target metals, and runs adaptive BFGS pre-relaxations.
-- **10 Realistic Motifs:** Systematically covers saturated 4-coordinated ($M\text{-N}_x\text{C}_{4-x}$) and single-vacancy 3-coordinated ($M\text{-N}_x\text{C}_{3-x}$) cavities without unphysical pore-collapse artifacts.
+- **10 Realistic Motifs:** Systematically covers saturated 4-coordinated (M-N_xC4-x) and single-vacancy 3-coordinated (MN_xC_3-x) cavities without unphysical pore-collapse artifacts.
 - **Phase-Space Sampling:** Resolves out-of-distribution (OOD) extrapolation errors with targeted $z$-approach scans, $\mathrm{H-H}$ bond cleavage grids, and $NVT$ AIMD snapshots.
 - **Automated MACE Fine-Tuning:** Benchmarks zero-shot foundation models (MACE-MP-0), fine-tunes a local potential, and quantifies performance improvements.
-- **Catalytic Reaction Profiling:** Automated CI-NEB across all 10 motifs to extract activation barriers ($E_a$), reaction energies ($\Delta E$), and harmonic free energy corrections ($\Delta G^\ddagger$ at $T, P$).
+- **Catalytic Reaction Profiling:** Automated CI-NEB across all 10 motifs to extract activation barriers (E_a), reaction energies (Delta E), and harmonic free energy corrections (Delta G at T, P).
 - **Active-Learning Dynamics:** Production MD with automated force-norm tripwires that dump high-uncertainty configurations back to DFT.
 
 ---
