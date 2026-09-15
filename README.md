@@ -6,18 +6,21 @@ An end-to-end computational pipeline designed to autonomously synthesize Single-
 
 ## Key Features
 
-- **Zero-Prerequisite Substrate Synthesis:** Builds graphene supercells analytically, punches divacancy pores, coordinates target metals, and runs adaptive BFGS pre-relaxations.
-- **10 Realistic Motifs:** Systematically covers saturated 4-coordinated (M-N_xC4-x) and single-vacancy 3-coordinated (MN_xC_3-x) cavities without unphysical pore-collapse artifacts.
-- **Phase-Space Sampling:** Resolves out-of-distribution (OOD) extrapolation errors with targeted $z$-approach scans, $\mathrm{H-H}$ bond cleavage grids, and $NVT$ AIMD snapshots.
-- **Automated MACE Fine-Tuning:** Benchmarks zero-shot foundation models (MACE-MP-0), fine-tunes a local potential, and quantifies performance improvements.
-- **Catalytic Reaction Profiling:** Automated CI-NEB across all 10 motifs to extract activation barriers (E_a), reaction energies (Delta E), and harmonic free energy corrections (Delta G at T, P).
-- **Active-Learning Dynamics:** Production MD with automated force-norm tripwires that dump high-uncertainty configurations back to DFT.
+- **Zero-Prerequisite Substrate Synthesis:** Construction programmatically of the graphene substrate with vacancy pores and metal anchoring (`synthesize_pristine_sac`).
+- **10 Realistic Motifs:** Systematic coverage of coordination configurations (saturated 4-coordinated M-N_x C_4-x and single-vacancy 3-coordinated M-N_x C_3-x motifs) without unphysical pore-collapse artifacts (`generate_motifs`).
+- **Phase-Space Sampling:** Exploration via static configurations, rattle perturbations, and molecular approach scans (`sample_static_configurations`).
+- **DFT Calculations (GPAW):** Electronic evaluation via plane-wave / grid methods incorporating spin polarization, k-point grid sampling, and DFT-D3 dispersion corrections (`run_dft_evaluation`, `run_aimd_trajectory`).
+- **Dataset Export & MACE Training:** Assembly of energy, force, and cell virial datasets followed by automated equivariant machine learning interatomic potential training (`export_mace_datasets`, `train_mace_model`).
+- **Active-Learning Dynamics:** Execution of production molecular dynamics coupled with out-of-distribution uncertainty trap detection to funnel high-error configurations back to DFT (`run_production_md`).
+- **Kinetic Screening via CI-NEB:** Automated climbing-image nudged elastic band calculations using IDPP interpolation and automatic BFGS-to-FIRE optimizer switching (`run_cineb_screening`).
+- **Statistical Thermodynamics & Vibrations:** Zero-point energy (ZPE) calculations and Gibbs free energy evaluations ΔG as a function of temperature T and pressure P (`compute_thermochemistry`).
+- **Automated Figure Generation:** Automated plotting of parity curves, reaction profiles, volcano diagrams, and molecular dynamics trajectories for publication (`generate_publication_figures`).
 
 ---
 
 ### Computational Parameters & Convergence Notes
 
-- **Supercell Architecture**: A 4×4 graphene supercell (31–33 atoms depending on H₂ adsorption state) with a 15 Å vacuum spacing along the z-axis is employed as the default benchmark. This setup yields an inter-site TM-TM separation of ~9.8 Å, which comfortably accommodates the local interaction cutoff of the MACE foundation model ($r_{\text{cut}} = 5.0$ Å) while drastically accelerating high-throughput screening.
+- **Supercell Architecture**: A 4×4 graphene supercell (31–33 atoms depending on H₂ adsorption state) with a 15 Å vacuum spacing along the z-axis is employed as the default benchmark. This setup yields an inter-site TM-TM separation of ~9.8 Å, which comfortably accommodates the local interaction cutoff of the MACE foundation model (r_cut = 5.0 Å) while drastically accelerating high-throughput screening.
 - **DFT Parameters (GPAW)**: Plane-wave / grid cutoff of 350 eV with PBE-D3 dispersion corrections. This configuration provides smooth, conservative force gradients (numerical noise < 0.05 eV/Å) suitable for training equivariant message-passing potentials while allowing the full autonomous pipeline to run efficiently on standard multi-core workstations.
 - **Production Scaling**: For ultra-high precision sub-chemical accuracy (< 0.02 eV barrier shifts), parameters can be readily scaled to 5×5 supercells and 450+ eV cutoffs directly in `config.yaml`.
 
